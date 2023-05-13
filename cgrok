@@ -1,0 +1,107 @@
+#!/bin/bash
+
+function usage() {
+echo """NAME:
+    cgrok - Cloudflare based ngrok clone
+
+USAGE:
+    cgrok [hostname] [port] [cert path]
+
+EXAMPLES;
+    cgrok localhost 9090
+
+VERSION:
+    2023.3.0
+"""
+}
+
+echo "cgrok - cloudflare ngrok clone"
+echo ""
+
+LHOST="$1"
+LPORT="$2"
+
+CFCERT=~/.cloudflared/cert.pem
+CFARGS="--origincert ~/.cloudflared/cert.pem"
+
+# if no options
+if [ -z "$1" ] && [ -z "$2" ]; then
+    LHOST="localhost"
+    LPORT="9090"
+fi
+
+# host but no port?
+if [ ! -z "$1" ] && [ -z "$2" ]; then
+    echo "Missing port"
+    usage
+    exit
+fi
+
+# attempt to get DOMAIN from cert.pem with certtool
+# if $3, that's the cert to use
+if [ ! -z $3 ] && [ -f $3 ]; then
+    CFCERT=$3
+fi
+
+# check if the file exists, then extract the DNSName from the cert
+if [ -f $CFCERT ]; then
+    echo "$CFCERT exists."
+    DOMAIN=$(certtool -i < $CFCERT | grep DNSname: | grep -v '*' | cut -d ':' -f 2 | xargs )
+else
+    echo "${CFCERT} not found"
+    echo "Please run:" 
+    echo "cloudflared tunnel login"
+    exit 3
+fi
+
+# generate random url
+RANDOMCRAP=$(uuidgen | cut -d '-' -f 1)
+RNAME="warpzone-${RANDOMCRAP}"
+RHOST="${RNAME}.${DOMAIN}"
+
+# trap ctrl-c and call ctrl_c()
+trap ctrl_c INT
+function ctrl_c() {
+        echo "** Trapped CTRL-C"
+        echo "Deleting tunnel ${RHOST}"
+        TUNNEL_ORIGIN_CERT=$CFCERT cloudflared tunnel --no-autoupdate delete ${RNAME}
+        echo ""
+        sleep 3 # wait for tunnels to close totally
+        echo "Have a nice day! -cheet"
+        exit 0
+}
+
+# start the tunnel and background it, watch the output for a successful connection from cloudflare edge
+TUNNEL_OUTPUT=$(mktemp "${TMPDIR:-/tmp/}$(basename $0).XXX")
+TUNNEL_ORIGIN_CERT=$CFCERT cloudflared tunnel --grace-period 3s --no-autoupdate --url ${LHOST}:${LPORT} -f --hostname ${RHOST} --name ${RNAME} &> $TUNNEL_OUTPUT &
+TUNNEL_PID=$!
+echo "TUNNEL PID:    $TUNNEL_PID"
+echo "TUNNEL OUTPUT: $TUNNEL_OUTPUT"
+echo "Waiting for tunnel to come up"
+until grep -q -i 'INF Registered tunnel connection ' $TUNNEL_OUTPUT
+do       
+    if ! ps $TUNNEL_PID > /dev/null 
+    then
+    echo "The tunnel died" >&2
+    exit 1
+    fi
+    echo -n "."
+    sleep 1
+done
+echo 
+echo "Tunnel is connected!"
+echo "" 
+echo "☁️   DOMAIN: ${DOMAIN}"
+echo "🏠  FROM:   http://${LHOST}:${LPORT}"
+echo "🔒  TUNNEL: https://${RHOST}"
+echo ""
+echo ""
+
+COUNTER=0
+# just hang out while we tunnel stuff
+while true
+do
+    sleep 10
+done
+
+TUNNEL_ORIGIN_CERT=$CFCERT cloudflared tunnel --no-autoupdate delete ${RNAME}
